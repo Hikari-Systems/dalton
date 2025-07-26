@@ -10,7 +10,7 @@ on:
 jobs:
   build:
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 10
+    timeout-minutes: 15
     strategy:
       matrix:
         platform: [amd64, arm64]
