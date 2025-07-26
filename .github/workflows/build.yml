@@ -1,0 +1,109 @@
+name: Build and push to GHCR
+
+on:
+  push:
+    branches:
+      - "*"
+    tags-ignore:
+      - "*"
+
+jobs:
+  build:
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        platform: [amd64, arm64]
+        include:
+          - platform: amd64
+            runner: blacksmith-2vcpu-ubuntu-2404
+          - platform: arm64
+            runner: blacksmith-2vcpu-ubuntu-2404-arm
+    services:
+      registry:
+        image: registry:3.0
+        env:
+          REGISTRY_STORAGE: s3
+          REGISTRY_STORAGE_S3_ACCESSKEY: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          REGISTRY_STORAGE_S3_SECRETKEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          REGISTRY_STORAGE_S3_REGION: ${{ secrets.AWS_REGION }}
+          REGISTRY_STORAGE_S3_BUCKET: hikari-docker-registry
+          REGISTRY_HTTP_ADDR: :5000
+          REGISTRY_HTTP_SECRET: ${{ secrets.DOCKER_REGISTRY_SECRET }}
+        ports:
+          - 5000:5000
+    steps:
+      - name: Make repo name
+        run: echo "REPO_NAME=$(echo ${{ github.repository }} | sed -e 's/^Hikari-Systems\///')" >> $GITHUB_ENV
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Log in to the Github container registry
+        uses: docker/login-action@v3
+        with:
+          registry: https://ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GH_TOKEN }}
+      - name: Make branch name
+        run: echo "GH_API_KEY=$(echo ${{ secrets.GH_TOKEN }})" >> $GITHUB_ENV
+      - name: Build and push Docker image
+        run: |
+          docker build --secret id=ghapikey,env=GH_API_KEY --platform linux/${{ matrix.platform }} -t ghcr.io/hikari-systems/${{ env.REPO_NAME }}:${{ github.sha }}-${{ matrix.platform }} .
+          docker push ghcr.io/hikari-systems/${{ env.REPO_NAME }}:${{ github.sha }}-${{ matrix.platform }}
+          docker tag ghcr.io/hikari-systems/${{ env.REPO_NAME }}:${{ github.sha }}-${{ matrix.platform }} localhost:5000/${{ env.REPO_NAME }}:${{ github.sha }}-${{ matrix.platform }}
+          docker push localhost:5000/${{ env.REPO_NAME }}:${{ github.sha }}-${{ matrix.platform }}
+  merge-manifest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: build
+    services:
+      registry:
+        image: registry:3.0
+        env:
+          REGISTRY_STORAGE: s3
+          REGISTRY_STORAGE_S3_ACCESSKEY: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          REGISTRY_STORAGE_S3_SECRETKEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          REGISTRY_STORAGE_S3_REGION: ${{ secrets.AWS_REGION }}
+          REGISTRY_STORAGE_S3_BUCKET: hikari-docker-registry
+          REGISTRY_HTTP_ADDR: :5000
+          REGISTRY_HTTP_SECRET: ${{ secrets.DOCKER_REGISTRY_SECRET }}
+        ports:
+          - 5000:5000
+    steps:
+      - name: Make repo name
+        run: echo "REPO_NAME=$(echo ${{ github.repository }} | sed -e 's/^Hikari-Systems\///')" >> $GITHUB_ENV
+      - name: Make branch name
+        run: echo "BRANCH_NAME=$(echo ${{ github.ref }} | sed -e 's/^refs\/heads\///')" >> $GITHUB_ENV
+      - name: Log in to the Github container registry
+        uses: docker/login-action@v3
+        with:
+          registry: https://ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GH_TOKEN }}
+      - name: Merge manifest
+        run: |
+          docker manifest create ghcr.io/hikari-systems/${{ env.REPO_NAME }}:${{ github.sha }} \
+            ghcr.io/hikari-systems/${{ env.REPO_NAME }}:${{ github.sha }}-amd64 \
+            ghcr.io/hikari-systems/${{ env.REPO_NAME }}:${{ github.sha }}-arm64
+          docker manifest create ghcr.io/hikari-systems/${{ env.REPO_NAME }}:${{ env.BRANCH_NAME }} \
+            ghcr.io/hikari-systems/${{ env.REPO_NAME }}:${{ github.sha }}-amd64 \
+            ghcr.io/hikari-systems/${{ env.REPO_NAME }}:${{ github.sha }}-arm64
+          docker manifest create ghcr.io/hikari-systems/${{ env.REPO_NAME }}:latest \
+            ghcr.io/hikari-systems/${{ env.REPO_NAME }}:${{ github.sha }}-amd64 \
+            ghcr.io/hikari-systems/${{ env.REPO_NAME }}:${{ github.sha }}-arm64
+          docker manifest push ghcr.io/hikari-systems/${{ env.REPO_NAME }}:${{ github.sha }}
+          docker manifest push ghcr.io/hikari-systems/${{ env.REPO_NAME }}:${{ env.BRANCH_NAME }}
+          docker manifest push ghcr.io/hikari-systems/${{ env.REPO_NAME }}:latest
+
+          docker manifest create --insecure localhost:5000/${{ env.REPO_NAME }}:${{ github.sha }} \
+            localhost:5000/${{ env.REPO_NAME }}:${{ github.sha }}-amd64 \
+            localhost:5000/${{ env.REPO_NAME }}:${{ github.sha }}-arm64
+          docker manifest create --insecure localhost:5000/${{ env.REPO_NAME }}:${{ env.BRANCH_NAME }} \
+            localhost:5000/${{ env.REPO_NAME }}:${{ github.sha }}-amd64 \
+            localhost:5000/${{ env.REPO_NAME }}:${{ github.sha }}-arm64
+          docker manifest create --insecure localhost:5000/${{ env.REPO_NAME }}:latest \
+            localhost:5000/${{ env.REPO_NAME }}:${{ github.sha }}-amd64 \
+            localhost:5000/${{ env.REPO_NAME }}:${{ github.sha }}-arm64
+          docker manifest push --insecure localhost:5000/${{ env.REPO_NAME }}:${{ github.sha }}
+          docker manifest push --insecure localhost:5000/${{ env.REPO_NAME }}:${{ env.BRANCH_NAME }}
+          docker manifest push --insecure localhost:5000/${{ env.REPO_NAME }}:latest
