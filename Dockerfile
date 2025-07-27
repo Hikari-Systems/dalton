@@ -90,13 +90,15 @@ RUN git clone --depth 1 --recursive https://github.com/SpiderLabs/ModSecurity.gi
     make install && \
     ldconfig
 
-# Build mod_security Apache connector  
+# Build mod_security Apache connector with proper library linkage
 RUN cd /tmp && \
     git clone --depth 1 https://github.com/SpiderLabs/ModSecurity-apache.git && \
     cd ModSecurity-apache && \
     ./autogen.sh && \
     ./configure --with-libmodsecurity=/usr/local/modsecurity \
-                --with-apxs=/usr/local/apache2/bin/apxs && \
+                --with-apxs=/usr/local/apache2/bin/apxs \
+                CPPFLAGS="-I/usr/local/modsecurity/include" \
+                LDFLAGS="-L/usr/local/modsecurity/lib -Wl,-rpath,/usr/local/modsecurity/lib" && \
     make -j$(nproc) && \
     # Ensure modules directory exists
     mkdir -p /static-build/modules && \
@@ -128,6 +130,8 @@ RUN cd /tmp && \
     # Extract the verified archive
     tar -xzf coreruleset-4.0.0.tar.gz && \
     mv coreruleset-4.0.0 /static-build/coreruleset && \
+    # Setup CRS configuration file
+    cp /static-build/coreruleset/crs-setup.conf.example /static-build/coreruleset/crs-setup.conf && \
     # Clean up
     rm -f coreruleset-4.0.0.tar.gz coreruleset-4.0.0.tar.gz.asc
 
@@ -161,12 +165,12 @@ RUN apt-get update && apt-get install -y \
     libssl3 \
     libxml2 \
     zlib1g \
-    curl \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
-# Create www-data user with consistent UID/GID across stages
-# RUN groupadd -r -g 33 www-data && useradd -r -u 33 -g www-data www-data
+# Create www-data user with consistent UID/GID across stages (only if they don't exist)
+RUN getent group www-data || groupadd -r -g 33 www-data && \
+    getent passwd www-data || useradd -r -u 33 -g www-data www-data
 
 # Copy Apache installation from builder
 COPY --from=builder /static-build/apache2 /usr/local/apache2
@@ -174,7 +178,9 @@ COPY --from=builder /static-build/apache2 /usr/local/apache2
 # Copy security modules
 COPY --from=builder /static-build/modules/*.so /usr/local/apache2/modules/
 
-# Copy required runtime libraries
+# Copy complete ModSecurity installation including headers and config files
+RUN mkdir -p /usr/local/modsecurity/
+COPY --from=builder /usr/local/modsecurity/ /usr/local/modsecurity/
 COPY --from=builder /static-build/runtime-libs/* /usr/local/lib/
 
 # Copy OWASP Core Rule Set
@@ -187,34 +193,27 @@ RUN ldconfig
 WORKDIR /usr/local/apache2
 ENV PATH=/usr/local/apache2/bin:$PATH
 
-# Create necessary directories with proper ownership
-RUN mkdir -p /var/log/mod_evasive \
-    && mkdir -p /var/log/modsec_audit \
+# Create necessary directories with proper ownership  
+RUN mkdir -p /usr/local/apache2/run \
     && mkdir -p /etc/modsecurity \
-    && mkdir -p /usr/local/apache2/logs \
-    && mkdir -p /usr/local/apache2/run \
-    && chown -R www-data:www-data /var/log/mod_evasive /var/log/modsec_audit \
-    && chown -R www-data:www-data /usr/local/apache2/logs \
+    && mkdir -p /usr/local/apache2/conf/sites-enabled \
     && chown -R www-data:www-data /usr/local/apache2/run
 
 # Copy configuration files
 COPY modsecurity.conf /etc/modsecurity/
-COPY security.conf /usr/local/apache2/conf/extra/
+COPY security.conf /usr/local/apache2/conf/
 COPY httpd-nonroot.conf /usr/local/apache2/conf/
 
 # Configure Apache for non-root operation
-RUN echo "Include conf/httpd-nonroot.conf" >> /usr/local/apache2/conf/httpd.conf && \
-    echo "LoadModule evasive24_module modules/mod_evasive24.so" >> /usr/local/apache2/conf/httpd.conf && \
-    echo "LoadModule security3_module modules/mod_security3.so" >> /usr/local/apache2/conf/httpd.conf && \
-    echo "Include conf/extra/security.conf" >> /usr/local/apache2/conf/httpd.conf
-
+RUN sed -i -E 's/^([[:space:]]*)(ErrorLog|CustomLog|Listen)/\1# \2/' /usr/local/apache2/conf/httpd.conf && \
+    echo 'Include conf/httpd-nonroot.conf' >> /usr/local/apache2/conf/httpd.conf
 # Switch to non-privileged user
 USER www-data
 
 EXPOSE 3000
 
-# Container health check
+# Container health check - verify httpd process is running and listening on port 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-    CMD curl -f http://localhost:3000/healthcheck || exit 1
+    CMD pgrep -f "httpd.*FOREGROUND" > /dev/null && ss -tuln | grep -q ":3000 " || exit 1
 
 CMD ["httpd", "-D", "FOREGROUND"]
