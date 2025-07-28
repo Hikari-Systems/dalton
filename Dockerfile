@@ -1,8 +1,6 @@
-FROM httpd:2.4-bookworm AS httpd-source
-
 FROM debian:bookworm-slim AS builder
 
-# Install build dependencies
+# Install build dependencies (matching official httpd image + pcre2 + security modules)
 RUN apt-get update && apt-get install -y \
     build-essential \
     libtool \
@@ -13,27 +11,69 @@ RUN apt-get update && apt-get install -y \
     wget \
     curl \
     gnupg \
-    libpcre3-dev \
-    libxml2-dev \
-    libcurl4-openssl-dev \
-    libyajl-dev \
-    libgeoip-dev \
-    liblua5.3-dev \
-    libfuzzy-dev \
-    libmaxminddb-dev \
-    apache2-dev \
+    bzip2 \
+    dpkg-dev \
+    gcc \
+    make \
+    patch \
     libapr1-dev \
     libaprutil1-dev \
+    libbrotli-dev \
+    libcurl4-openssl-dev \
+    libjansson-dev \
+    liblua5.2-dev \
+    libnghttp2-dev \
+    libpcre2-dev \
+    libssl-dev \
+    libxml2-dev \
+    zlib1g-dev \
+    libyajl-dev \
+    libgeoip-dev \
+    libfuzzy-dev \
+    libmaxminddb-dev \
     && rm -rf /var/lib/apt/lists/*
-
-# Copy Apache installation from official image
-COPY --from=httpd-source /usr/local/apache2 /usr/local/apache2
 
 # Create static build directory
 RUN mkdir -p /static-build/{lib,modules,apache2}
 
-# Copy Apache installation for later use
-RUN cp -r /usr/local/apache2 /static-build/
+# Copy Apache GPG keys file
+COPY apache-keys.txt /tmp/
+
+# Build Apache httpd from source with pcre2 support
+WORKDIR /tmp
+RUN wget https://downloads.apache.org/httpd/httpd-2.4.65.tar.gz && \
+    wget https://downloads.apache.org/httpd/httpd-2.4.65.tar.gz.asc && \
+    # Import Apache release signing keys from file
+    export GNUPGHOME="$(mktemp -d)" && \
+    while read -r key; do \
+        [ -n "$key" ] && ( \
+            gpg --batch --keyserver keyserver.ubuntu.com --recv-keys "$key" || \
+            gpg --batch --keyserver pgp.mit.edu --recv-keys "$key" || true \
+        ); \
+    done < apache-keys.txt && \
+    gpg --batch --verify httpd-2.4.65.tar.gz.asc httpd-2.4.65.tar.gz && \
+    gpgconf --kill all && \
+    rm -rf "$GNUPGHOME" httpd-2.4.65.tar.gz.asc && \
+    tar -xzf httpd-2.4.65.tar.gz && \
+    cd httpd-2.4.65 && \
+    gnuArch="$(dpkg-architecture --query DEB_BUILD_GNU_TYPE)" && \
+    CFLAGS="$(dpkg-buildflags --get CFLAGS)" && \
+    CPPFLAGS="$(dpkg-buildflags --get CPPFLAGS)" && \
+    LDFLAGS="$(dpkg-buildflags --get LDFLAGS)" && \
+    ./configure \
+        --build="$gnuArch" \
+        --prefix=/usr/local/apache2 \
+        --enable-mods-shared=reallyall \
+        --enable-mpms-shared=all \
+        --enable-pie \
+        --with-pcre=/usr/bin/pcre2-config \
+        CFLAGS="-pipe $CFLAGS" \
+        CPPFLAGS="$CPPFLAGS" \
+        LDFLAGS="-Wl,--as-needed $LDFLAGS" && \
+    make -j$(nproc) && \
+    make install && \
+    # Copy to static build directory
+    cp -r /usr/local/apache2 /static-build/
 
 # Build mod_security
 WORKDIR /tmp
@@ -42,22 +82,24 @@ RUN git clone --depth 1 --recursive https://github.com/SpiderLabs/ModSecurity.gi
     git submodule init && \
     git submodule update && \
     ./build.sh && \
-    ./configure --enable-pcre-study \
+    ./configure --enable-pcre2 \
                 --enable-lua \
                 --enable-geoip \
                 --enable-fuzzy-hashing && \
-    make && \
+    make -j$(nproc) && \
     make install && \
     ldconfig
 
-# Build mod_security Apache connector  
+# Build mod_security Apache connector with proper library linkage
 RUN cd /tmp && \
     git clone --depth 1 https://github.com/SpiderLabs/ModSecurity-apache.git && \
     cd ModSecurity-apache && \
     ./autogen.sh && \
     ./configure --with-libmodsecurity=/usr/local/modsecurity \
-                --with-apxs=/usr/local/apache2/bin/apxs && \
-    make && \
+                --with-apxs=/usr/local/apache2/bin/apxs \
+                CPPFLAGS="-I/usr/local/modsecurity/include" \
+                LDFLAGS="-L/usr/local/modsecurity/lib -Wl,-rpath,/usr/local/modsecurity/lib" && \
+    make -j$(nproc) && \
     # Ensure modules directory exists
     mkdir -p /static-build/modules && \
     # Extract the .so file from the libtool archive
@@ -88,6 +130,8 @@ RUN cd /tmp && \
     # Extract the verified archive
     tar -xzf coreruleset-4.0.0.tar.gz && \
     mv coreruleset-4.0.0 /static-build/coreruleset && \
+    # Setup CRS configuration file
+    cp /static-build/coreruleset/crs-setup.conf.example /static-build/coreruleset/crs-setup.conf && \
     # Clean up
     rm -f coreruleset-4.0.0.tar.gz coreruleset-4.0.0.tar.gz.asc
 
@@ -111,13 +155,22 @@ RUN apt-get update && apt-get install -y \
     libapr1 \
     libaprutil1 \
     libaprutil1-ldap \
-    libpcre3 \
-    curl \
+    libldap-common \
+    libbrotli1 \
+    libcurl4 \
+    libjansson4 \
+    liblua5.2-0 \
+    libnghttp2-14 \
+    libpcre2-8-0 \
+    libssl3 \
+    libxml2 \
+    zlib1g \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
-# Create www-data user with consistent UID/GID across stages
-# RUN groupadd -r -g 33 www-data && useradd -r -u 33 -g www-data www-data
+# Create www-data user with consistent UID/GID across stages (only if they don't exist)
+RUN getent group www-data || groupadd -r -g 33 www-data && \
+    getent passwd www-data || useradd -r -u 33 -g www-data www-data
 
 # Copy Apache installation from builder
 COPY --from=builder /static-build/apache2 /usr/local/apache2
@@ -125,7 +178,9 @@ COPY --from=builder /static-build/apache2 /usr/local/apache2
 # Copy security modules
 COPY --from=builder /static-build/modules/*.so /usr/local/apache2/modules/
 
-# Copy required runtime libraries
+# Copy complete ModSecurity installation including headers and config files
+RUN mkdir -p /usr/local/modsecurity/
+COPY --from=builder /usr/local/modsecurity/ /usr/local/modsecurity/
 COPY --from=builder /static-build/runtime-libs/* /usr/local/lib/
 
 # Copy OWASP Core Rule Set
@@ -138,34 +193,27 @@ RUN ldconfig
 WORKDIR /usr/local/apache2
 ENV PATH=/usr/local/apache2/bin:$PATH
 
-# Create necessary directories with proper ownership
-RUN mkdir -p /var/log/mod_evasive \
-    && mkdir -p /var/log/modsec_audit \
+# Create necessary directories with proper ownership  
+RUN mkdir -p /usr/local/apache2/run \
     && mkdir -p /etc/modsecurity \
-    && mkdir -p /usr/local/apache2/logs \
-    && mkdir -p /usr/local/apache2/run \
-    && chown -R www-data:www-data /var/log/mod_evasive /var/log/modsec_audit \
-    && chown -R www-data:www-data /usr/local/apache2/logs \
+    && mkdir -p /usr/local/apache2/conf/sites-enabled \
     && chown -R www-data:www-data /usr/local/apache2/run
 
 # Copy configuration files
 COPY modsecurity.conf /etc/modsecurity/
-COPY security.conf /usr/local/apache2/conf/extra/
+COPY security.conf /usr/local/apache2/conf/
 COPY httpd-nonroot.conf /usr/local/apache2/conf/
 
 # Configure Apache for non-root operation
-RUN echo "Include conf/httpd-nonroot.conf" >> /usr/local/apache2/conf/httpd.conf && \
-    echo "LoadModule evasive24_module modules/mod_evasive24.so" >> /usr/local/apache2/conf/httpd.conf && \
-    echo "LoadModule security3_module modules/mod_security3.so" >> /usr/local/apache2/conf/httpd.conf && \
-    echo "Include conf/extra/security.conf" >> /usr/local/apache2/conf/httpd.conf
-
+RUN sed -i -E 's/^([[:space:]]*)(ErrorLog|CustomLog|Listen)/\1# \2/' /usr/local/apache2/conf/httpd.conf && \
+    echo 'Include conf/httpd-nonroot.conf' >> /usr/local/apache2/conf/httpd.conf
 # Switch to non-privileged user
 USER www-data
 
 EXPOSE 3000
 
-# Container health check
+# Container health check - verify httpd process is running and listening on port 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-    CMD curl -f http://localhost:3000/healthcheck || exit 1
+    CMD pgrep -f "httpd.*FOREGROUND" > /dev/null && ss -tuln | grep -q ":3000 " || exit 1
 
 CMD ["httpd", "-D", "FOREGROUND"]
