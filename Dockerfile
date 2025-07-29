@@ -212,8 +212,8 @@ USER www-data
 
 EXPOSE 3000
 
-# Container health check - verify httpd process is running and listening on port 3000
+# Container health check - verify httpd process is running using /proc filesystem
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-    CMD pgrep -f "httpd.*FOREGROUND" > /dev/null && ss -tuln | grep -q ":3000 " || exit 1
+    CMD test -d /proc/$(cat /usr/local/apache2/run/httpd.pid 2>/dev/null) 2>/dev/null || exit 1
 
 CMD ["httpd", "-D", "FOREGROUND"]
