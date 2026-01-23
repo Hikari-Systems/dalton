@@ -1,5 +1,7 @@
 FROM debian:bookworm-slim AS builder
 
+ARG HTTPD_VERSION 2.4.65
+
 # Install build dependencies (matching official httpd image + pcre2 + security modules)
 RUN apt-get update && apt-get install -y \
     build-essential \
@@ -41,8 +43,8 @@ COPY apache-keys.txt /tmp/
 
 # Build Apache httpd from source with pcre2 support
 WORKDIR /tmp
-RUN wget https://downloads.apache.org/httpd/httpd-2.4.65.tar.gz && \
-    wget https://downloads.apache.org/httpd/httpd-2.4.65.tar.gz.asc && \
+RUN wget https://archive.apache.org/dist/httpd/httpd-${HTTPD_VERSION}.tar.gz && \
+    wget https://archive.apache.org/dist/httpd/httpd-${HTTPD_VERSION}.tar.gz.asc && \
     # Import Apache release signing keys from file
     export GNUPGHOME="$(mktemp -d)" && \
     while read -r key; do \
@@ -51,11 +53,11 @@ RUN wget https://downloads.apache.org/httpd/httpd-2.4.65.tar.gz && \
             gpg --batch --keyserver pgp.mit.edu --recv-keys "$key" || true \
         ); \
     done < apache-keys.txt && \
-    gpg --batch --verify httpd-2.4.65.tar.gz.asc httpd-2.4.65.tar.gz && \
+    gpg --batch --verify httpd-${HTTPD_VERSION}.tar.gz.asc httpd-${HTTPD_VERSION}.tar.gz && \
     gpgconf --kill all && \
-    rm -rf "$GNUPGHOME" httpd-2.4.65.tar.gz.asc && \
-    tar -xzf httpd-2.4.65.tar.gz && \
-    cd httpd-2.4.65 && \
+    rm -rf "$GNUPGHOME" httpd-${HTTPD_VERSION}.tar.gz.asc && \
+    tar -xzf httpd-${HTTPD_VERSION}.tar.gz && \
+    cd httpd-${HTTPD_VERSION} && \
     gnuArch="$(dpkg-architecture --query DEB_BUILD_GNU_TYPE)" && \
     CFLAGS="$(dpkg-buildflags --get CFLAGS)" && \
     CPPFLAGS="$(dpkg-buildflags --get CPPFLAGS)" && \
