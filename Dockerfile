@@ -1,6 +1,6 @@
 FROM debian:bookworm-slim AS builder
 
-ARG HTTPD_VERSION 2.4.65
+ARG HTTPD_VERSION=2.4.65
 
 # Install build dependencies (matching official httpd image + pcre2 + security modules)
 RUN apt-get update && apt-get install -y \
@@ -48,10 +48,10 @@ RUN wget https://archive.apache.org/dist/httpd/httpd-${HTTPD_VERSION}.tar.gz && 
     # Import Apache release signing keys from file
     export GNUPGHOME="$(mktemp -d)" && \
     while read -r key; do \
-        [ -n "$key" ] && ( \
-            gpg --batch --keyserver keyserver.ubuntu.com --recv-keys "$key" || \
-            gpg --batch --keyserver pgp.mit.edu --recv-keys "$key" || true \
-        ); \
+    [ -n "$key" ] && ( \
+    gpg --batch --keyserver keyserver.ubuntu.com --recv-keys "$key" || \
+    gpg --batch --keyserver pgp.mit.edu --recv-keys "$key" || true \
+    ); \
     done < apache-keys.txt && \
     gpg --batch --verify httpd-${HTTPD_VERSION}.tar.gz.asc httpd-${HTTPD_VERSION}.tar.gz && \
     gpgconf --kill all && \
@@ -63,15 +63,15 @@ RUN wget https://archive.apache.org/dist/httpd/httpd-${HTTPD_VERSION}.tar.gz && 
     CPPFLAGS="$(dpkg-buildflags --get CPPFLAGS)" && \
     LDFLAGS="$(dpkg-buildflags --get LDFLAGS)" && \
     ./configure \
-        --build="$gnuArch" \
-        --prefix=/usr/local/apache2 \
-        --enable-mods-shared=reallyall \
-        --enable-mpms-shared=all \
-        --enable-pie \
-        --with-pcre=/usr/bin/pcre2-config \
-        CFLAGS="-pipe $CFLAGS" \
-        CPPFLAGS="$CPPFLAGS" \
-        LDFLAGS="-Wl,--as-needed $LDFLAGS" && \
+    --build="$gnuArch" \
+    --prefix=/usr/local/apache2 \
+    --enable-mods-shared=reallyall \
+    --enable-mpms-shared=all \
+    --enable-pie \
+    --with-pcre=/usr/bin/pcre2-config \
+    CFLAGS="-pipe $CFLAGS" \
+    CPPFLAGS="$CPPFLAGS" \
+    LDFLAGS="-Wl,--as-needed $LDFLAGS" && \
     make -j$(nproc) && \
     make install && \
     # Copy to static build directory
@@ -85,9 +85,9 @@ RUN git clone --depth 1 --recursive https://github.com/SpiderLabs/ModSecurity.gi
     git submodule update && \
     ./build.sh && \
     ./configure --enable-pcre2 \
-                --enable-lua \
-                --enable-geoip \
-                --enable-fuzzy-hashing && \
+    --enable-lua \
+    --enable-geoip \
+    --enable-fuzzy-hashing && \
     make -j$(nproc) && \
     make install && \
     ldconfig
@@ -98,9 +98,9 @@ RUN cd /tmp && \
     cd ModSecurity-apache && \
     ./autogen.sh && \
     ./configure --with-libmodsecurity=/usr/local/modsecurity \
-                --with-apxs=/usr/local/apache2/bin/apxs \
-                CPPFLAGS="-I/usr/local/modsecurity/include" \
-                LDFLAGS="-L/usr/local/modsecurity/lib -Wl,-rpath,/usr/local/modsecurity/lib" && \
+    --with-apxs=/usr/local/apache2/bin/apxs \
+    CPPFLAGS="-I/usr/local/modsecurity/include" \
+    LDFLAGS="-L/usr/local/modsecurity/lib -Wl,-rpath,/usr/local/modsecurity/lib" && \
     make -j$(nproc) && \
     # Ensure modules directory exists
     mkdir -p /static-build/modules && \
@@ -144,7 +144,7 @@ RUN strip /static-build/modules/*.so
 RUN mkdir -p /static-build/runtime-libs && \
     cp /usr/local/modsecurity/lib/libmodsecurity.so* /static-build/runtime-libs/ 2>/dev/null || true && \
     for lib in /static-build/modules/*.so; do \
-        ldd "$lib" | grep "=> /" | awk '{print $3}' | xargs -I {} cp {} /static-build/runtime-libs/ 2>/dev/null || true; \
+    ldd "$lib" | grep "=> /" | awk '{print $3}' | xargs -I {} cp {} /static-build/runtime-libs/ 2>/dev/null || true; \
     done
 
 # Production stage - minimal runtime container
