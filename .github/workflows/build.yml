@@ -36,7 +36,7 @@ jobs:
       - name: Make repo name
         run: echo "REPO_NAME=$(echo ${{ github.repository }} | sed -e 's/^Hikari-Systems\///')" >> $GITHUB_ENV
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Log in to the Github container registry
         uses: docker/login-action@v3
@@ -67,6 +67,7 @@ jobs:
           REGISTRY_STORAGE_S3_BUCKET: hikari-docker-registry
           REGISTRY_HTTP_ADDR: :5000
           REGISTRY_HTTP_SECRET: ${{ secrets.DOCKER_REGISTRY_SECRET }}
+          REGISTRY_STORAGE_DELETE_ENABLED: "true"
         ports:
           - 5000:5000
     steps:
@@ -107,3 +108,18 @@ jobs:
           docker manifest push --insecure localhost:5000/${{ env.REPO_NAME }}:${{ github.sha }}
           docker manifest push --insecure localhost:5000/${{ env.REPO_NAME }}:${{ env.BRANCH_NAME }}
           docker manifest push --insecure localhost:5000/${{ env.REPO_NAME }}:latest
+
+      - name: Remove per-arch tags
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          for ARCH in amd64 arm64; do
+            VERSION_ID=$(gh api "/orgs/hikari-systems/packages/container/${{ env.REPO_NAME }}/versions" \
+              --jq ".[] | select(.metadata.container.tags[] == \"${{ github.sha }}-${ARCH}\") | .id")
+            if [ -n "$VERSION_ID" ]; then
+              gh api -X DELETE "/orgs/hikari-systems/packages/container/${{ env.REPO_NAME }}/versions/${VERSION_ID}"
+              echo "Deleted GHCR version ${VERSION_ID} (${ARCH})"
+            fi
+            curl -sf -X DELETE \
+              "http://localhost:5000/v2/${{ env.REPO_NAME }}/manifests/${{ github.sha }}-${ARCH}"
+          done
