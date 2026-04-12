@@ -36,10 +36,10 @@ jobs:
       - name: Make repo name
         run: echo "REPO_NAME=$(echo ${{ github.repository }} | sed -e 's/^Hikari-Systems\///')" >> $GITHUB_ENV
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6.0.2
 
       - name: Log in to the Github container registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4.1.0
         with:
           registry: https://ghcr.io
           username: ${{ github.actor }}
@@ -76,7 +76,7 @@ jobs:
       - name: Make branch name
         run: echo "BRANCH_NAME=$(echo ${{ github.ref }} | sed -e 's/^refs\/heads\///')" >> $GITHUB_ENV
       - name: Log in to the Github container registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4.1.0
         with:
           registry: https://ghcr.io
           username: ${{ github.actor }}
