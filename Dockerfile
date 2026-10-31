@@ -203,6 +203,7 @@ RUN mkdir -p /usr/local/apache2/run \
 
 # Copy configuration files
 COPY modsecurity.conf /etc/modsecurity/
+COPY --from=builder /tmp/ModSecurity/unicode.mapping /etc/modsecurity/unicode.mapping
 COPY security.conf /usr/local/apache2/conf/
 COPY httpd-nonroot.conf /usr/local/apache2/conf/
 
