@@ -1,0 +1,8 @@
+# nginx release signing keys: <name at https://nginx.org/keys/NAME.key> <fingerprint>.
+# Source tarball signatures must come from one of these; nginx_signing is the
+# key of the nginx.org package repository. https://nginx.org/en/pgp_keys.html
+nginx_signing 8540A6F18833A80E9C1653A42FD21310B49F6B46
+arut 43387825DDB1BB97EC36BA5D007C8D7C15D87369
+pluknet D6786CE303D9A9022998DC6CC8464D549AF75C0A
+sb 7338973069ED3F443F4D37DFA64FD5B17ADB39A8
+thresh 13C82A63B603576156E30A4EA0EA981B66B0D967

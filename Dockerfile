@@ -1,222 +1,169 @@
-FROM debian:bookworm-slim AS builder
+# dalton: nginx reverse proxy + WAF (ModSecurity v3, OWASP CRS 4) with
+# OpenTelemetry tracing, behind AWS ALB / CloudFront.
+#
+# Runtime: debian:<codename>-slim + nginx.org's nginx and nginx-module-otel
+# packages (only those: none of the extra modules the official image carries).
+# Builder: libmodsecurity, ModSecurity-nginx and headers-more, compiled as
+# dynamic modules against the same nginx version (--with-compat).
+#
+#   docker build .                          # trixie-slim
+#   docker build --build-arg DEBIAN=bookworm .   # bookworm-slim
 
-ARG HTTPD_VERSION=2.4.65
+ARG DEBIAN=trixie
+ARG NGINX_VERSION=1.30.6
+ARG NGINX_OTEL_VERSION=0.1.2
+ARG MODSECURITY_VERSION=3.0.17
+ARG MODSECURITY_NGINX_VERSION=1.0.4
+ARG HEADERS_MORE_VERSION=0.41
+ARG CRS_VERSION=4.30.0
 
-# Install build dependencies (matching official httpd image + pcre2 + security modules)
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    libtool \
-    autoconf \
-    automake \
-    pkg-config \
-    git \
-    wget \
-    curl \
-    gnupg \
-    bzip2 \
-    dpkg-dev \
-    gcc \
-    make \
-    patch \
-    libapr1-dev \
-    libaprutil1-dev \
-    libbrotli-dev \
-    libcurl4-openssl-dev \
-    libjansson-dev \
-    liblua5.2-dev \
-    libnghttp2-dev \
-    libpcre2-dev \
-    libssl-dev \
-    libxml2-dev \
-    zlib1g-dev \
-    libyajl-dev \
-    libgeoip-dev \
-    libfuzzy-dev \
-    libmaxminddb-dev \
+# ============================================================== builder
+FROM debian:${DEBIAN} AS builder
+ARG NGINX_VERSION
+ARG MODSECURITY_VERSION
+ARG MODSECURITY_NGINX_VERSION
+ARG HEADERS_MORE_VERSION
+ARG CRS_VERSION
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl git gnupg dirmngr \
+        build-essential autoconf automake libtool pkg-config \
+        libpcre2-dev zlib1g-dev libssl-dev \
+        libyajl-dev libxml2-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Create static build directory
-RUN mkdir -p /static-build/{lib,modules,apache2}
+WORKDIR /src
+COPY nginx-keys.txt /src/
 
-# Copy Apache GPG keys file
-COPY apache-keys.txt /tmp/
+# nginx source, signature checked against the release keys in nginx-keys.txt
+# (fingerprints pinned there; keys fetched from nginx.org/keys).
+RUN set -eux; \
+    export GNUPGHOME="$(mktemp -d)"; \
+    grep -vE '^\s*(#|$)' nginx-keys.txt | while read -r name fpr; do \
+        curl -fsSL "https://nginx.org/keys/${name}.key" | gpg --batch --import; \
+        gpg --batch --list-keys --with-colons "$fpr" | grep -q "^fpr:::::::::${fpr}:"; \
+    done; \
+    curl -fsSLO "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"; \
+    curl -fsSLO "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz.asc"; \
+    gpg --batch --status-fd 1 --verify "nginx-${NGINX_VERSION}.tar.gz.asc" "nginx-${NGINX_VERSION}.tar.gz" \
+        | grep -E "VALIDSIG ($(grep -vE '^\s*(#|$)' nginx-keys.txt | awk '{print $2}' | paste -sd'|'))"; \
+    tar xzf "nginx-${NGINX_VERSION}.tar.gz"; \
+    gpgconf --kill all; rm -rf "$GNUPGHOME"
 
-# Build Apache httpd from source with pcre2 support
-WORKDIR /tmp
-RUN wget https://archive.apache.org/dist/httpd/httpd-${HTTPD_VERSION}.tar.gz && \
-    wget https://archive.apache.org/dist/httpd/httpd-${HTTPD_VERSION}.tar.gz.asc && \
-    # Import Apache release signing keys from file
-    export GNUPGHOME="$(mktemp -d)" && \
-    while read -r key; do \
-    [ -n "$key" ] && ( \
-    gpg --batch --keyserver keyserver.ubuntu.com --recv-keys "$key" || \
-    gpg --batch --keyserver pgp.mit.edu --recv-keys "$key" || true \
-    ); \
-    done < apache-keys.txt && \
-    gpg --batch --verify httpd-${HTTPD_VERSION}.tar.gz.asc httpd-${HTTPD_VERSION}.tar.gz && \
-    gpgconf --kill all && \
-    rm -rf "$GNUPGHOME" httpd-${HTTPD_VERSION}.tar.gz.asc && \
-    tar -xzf httpd-${HTTPD_VERSION}.tar.gz && \
-    cd httpd-${HTTPD_VERSION} && \
-    gnuArch="$(dpkg-architecture --query DEB_BUILD_GNU_TYPE)" && \
-    CFLAGS="$(dpkg-buildflags --get CFLAGS)" && \
-    CPPFLAGS="$(dpkg-buildflags --get CPPFLAGS)" && \
-    LDFLAGS="$(dpkg-buildflags --get LDFLAGS)" && \
-    ./configure \
-    --build="$gnuArch" \
-    --prefix=/usr/local/apache2 \
-    --enable-mods-shared=reallyall \
-    --enable-mpms-shared=all \
-    --enable-pie \
-    --with-pcre=/usr/bin/pcre2-config \
-    CFLAGS="-pipe $CFLAGS" \
-    CPPFLAGS="$CPPFLAGS" \
-    LDFLAGS="-Wl,--as-needed $LDFLAGS" && \
-    make -j$(nproc) && \
-    make install && \
-    # Copy to static build directory
-    cp -r /usr/local/apache2 /static-build/
+# libmodsecurity v3 (OWASP; pinned tag). Only the features dalton's rules use:
+# PCRE2, JSON (yajl) and XML body parsers. Lua, GeoIP/MaxMind, ssdeep, LMDB
+# and curl (remote rules) were linked in the Apache image but nothing used them.
+RUN set -eux; \
+    git clone --depth 1 --branch "v${MODSECURITY_VERSION}" --recurse-submodules --shallow-submodules \
+        https://github.com/owasp-modsecurity/ModSecurity.git; \
+    cd ModSecurity; \
+    ./build.sh; \
+    ./configure --prefix=/usr/local/modsecurity \
+        --with-pcre2 --with-yajl --with-libxml \
+        --without-lua --without-maxmind --without-geoip --without-ssdeep \
+        --without-lmdb --without-curl \
+        --disable-doxygen-doc --disable-examples --disable-dependency-tracking; \
+    make -j"$(nproc)"; \
+    make install; \
+    strip --strip-unneeded /usr/local/modsecurity/lib/libmodsecurity.so.*.*.*
 
-# Build mod_security
-WORKDIR /tmp
-RUN git clone --depth 1 --recursive https://github.com/SpiderLabs/ModSecurity.git && \
-    cd ModSecurity && \
-    git submodule init && \
-    git submodule update && \
-    ./build.sh && \
-    ./configure --enable-pcre2 \
-    --enable-lua \
-    --enable-geoip \
-    --enable-fuzzy-hashing && \
-    make -j$(nproc) && \
-    make install && \
-    ldconfig
+# ModSecurity-nginx connector and headers-more, as dynamic modules for the
+# packaged nginx (--with-compat keeps the module ABI the same).
+RUN set -eux; \
+    git clone --depth 1 --branch "v${MODSECURITY_NGINX_VERSION}" https://github.com/owasp-modsecurity/ModSecurity-nginx.git; \
+    git clone --depth 1 --branch "v${HEADERS_MORE_VERSION}" https://github.com/openresty/headers-more-nginx-module.git; \
+    cd "nginx-${NGINX_VERSION}"; \
+    MODSECURITY_INC=/usr/local/modsecurity/include MODSECURITY_LIB=/usr/local/modsecurity/lib \
+    ./configure --with-compat \
+        --add-dynamic-module=../ModSecurity-nginx \
+        --add-dynamic-module=../headers-more-nginx-module; \
+    make -j"$(nproc)" modules; \
+    mkdir -p /out/modules; \
+    cp objs/ngx_http_modsecurity_module.so objs/ngx_http_headers_more_filter_module.so /out/modules/; \
+    strip --strip-unneeded /out/modules/*.so
 
-# Build mod_security Apache connector with proper library linkage
-RUN cd /tmp && \
-    git clone --depth 1 https://github.com/SpiderLabs/ModSecurity-apache.git && \
-    cd ModSecurity-apache && \
-    ./autogen.sh && \
-    ./configure --with-libmodsecurity=/usr/local/modsecurity \
-    --with-apxs=/usr/local/apache2/bin/apxs \
-    CPPFLAGS="-I/usr/local/modsecurity/include" \
-    LDFLAGS="-L/usr/local/modsecurity/lib -Wl,-rpath,/usr/local/modsecurity/lib" && \
-    make -j$(nproc) && \
-    # Ensure modules directory exists
-    mkdir -p /static-build/modules && \
-    # Extract the .so file from the libtool archive
-    /usr/share/apr-1.0/build/libtool --mode=install install -c src/mod_security3.la /static-build/ && \
-    # Move the .so file to the modules directory
-    mv /static-build/mod_security3.so /static-build/modules/ && \
-    # Verify it's there
-    ls -la /static-build/modules/mod_security3.so
+# OWASP Core Rule Set, signature checked against the CRS project key.
+RUN set -eux; \
+    export GNUPGHOME="$(mktemp -d)"; \
+    curl -fsSL https://coreruleset.org/security.asc | gpg --batch --import; \
+    gpg --batch --list-keys --with-colons 36006F0E0BA167832158821138EEACA1AB8A6E72 >/dev/null; \
+    base="https://github.com/coreruleset/coreruleset/releases/download/v${CRS_VERSION}"; \
+    curl -fsSLo crs.tar.gz "${base}/coreruleset-${CRS_VERSION}-minimal.tar.gz"; \
+    curl -fsSLo crs.tar.gz.asc "${base}/coreruleset-${CRS_VERSION}-minimal.tar.gz.asc"; \
+    gpg --batch --status-fd 1 --verify crs.tar.gz.asc crs.tar.gz | grep -q 'VALIDSIG 36006F0E0BA167832158821138EEACA1AB8A6E72'; \
+    tar xzf crs.tar.gz; \
+    mv "coreruleset-${CRS_VERSION}" /out/coreruleset; \
+    cp /out/coreruleset/crs-setup.conf.example /out/coreruleset/crs-setup.conf; \
+    # The site files remove these rule IDs per path; fail the build if CRS
+    # ever renames or drops one, rather than silently stop exempting.
+    for id in 911100 920350 949110; do grep -q "id:${id}," /out/coreruleset/rules/*.conf; done; \
+    cp /src/ModSecurity/unicode.mapping /out/unicode.mapping; \
+    gpgconf --kill all; rm -rf "$GNUPGHOME"
 
-# Build mod_evasive
-RUN cd /tmp && \
-    git clone --depth 1 https://github.com/jvdmr/mod_evasive.git && \
-    cd mod_evasive && \
-    /usr/local/apache2/bin/apxs -c mod_evasive24.c && \
-    cp .libs/mod_evasive24.so /static-build/modules/mod_evasive24.so
+# The runtime packages libmodsecurity and the modules link against, as Debian
+# package names, so the runtime stage installs exactly those.
+RUN set -eux; \
+    for f in /usr/local/modsecurity/lib/libmodsecurity.so /out/modules/*.so; do \
+        ldd "$f" | awk '/=> \// { print $3 }'; \
+    done | grep -v /usr/local/modsecurity | sort -u | xargs -r realpath | xargs -r dpkg -S 2>/dev/null \
+        | cut -d: -f1 | sort -u > /out/runtime-packages.txt; \
+    cat /out/runtime-packages.txt
 
-# Download OWASP Core Rule Set with GPG signature verification
-RUN cd /tmp && \
-    # Download the release file and signature
-    wget -O coreruleset-4.0.0.tar.gz https://github.com/coreruleset/coreruleset/archive/refs/tags/v4.0.0.tar.gz && \
-    wget -O coreruleset-4.0.0.tar.gz.asc https://github.com/coreruleset/coreruleset/releases/download/v4.0.0/coreruleset-4.0.0.tar.gz.asc && \
-    # Import OWASP CRS project's GPG key
-    gpg --fetch-key https://coreruleset.org/security.asc || \
-    gpg --keyserver pgp.mit.edu --recv-keys 0x38EEACA1AB8A6E72 || \
-    gpg --keyserver keyserver.ubuntu.com --recv-keys 36006F0E0BA167832158821138EEACA1AB8A6E72 && \
-    # Verify the signature
-    gpg --verify coreruleset-4.0.0.tar.gz.asc coreruleset-4.0.0.tar.gz && \
-    # Extract the verified archive
-    tar -xzf coreruleset-4.0.0.tar.gz && \
-    mv coreruleset-4.0.0 /static-build/coreruleset && \
-    # Setup CRS configuration file
-    cp /static-build/coreruleset/crs-setup.conf.example /static-build/coreruleset/crs-setup.conf && \
-    # Clean up
-    rm -f coreruleset-4.0.0.tar.gz coreruleset-4.0.0.tar.gz.asc
+# ============================================================== runtime
+FROM debian:${DEBIAN}-slim
+ARG DEBIAN
+ARG NGINX_VERSION
+ARG NGINX_OTEL_VERSION
 
-# Strip symbols from binaries to reduce size
-RUN strip /static-build/modules/*.so
+COPY --from=builder /out/runtime-packages.txt /tmp/runtime-packages.txt
+COPY nginx-keys.txt /tmp/nginx-keys.txt
 
-# Copy required runtime libraries (including ModSecurity)
-RUN mkdir -p /static-build/runtime-libs && \
-    cp /usr/local/modsecurity/lib/libmodsecurity.so* /static-build/runtime-libs/ 2>/dev/null || true && \
-    for lib in /static-build/modules/*.so; do \
-    ldd "$lib" | grep "=> /" | awk '{print $3}' | xargs -I {} cp {} /static-build/runtime-libs/ 2>/dev/null || true; \
-    done
+# nginx and its OpenTelemetry module from nginx.org's repository, pinned to the
+# version the modules were built against. The repository key's fingerprint is
+# checked before apt trusts it.
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates curl gnupg; \
+    curl -fsSL https://nginx.org/keys/nginx_signing.key | gpg --dearmor -o /usr/share/keyrings/nginx.gpg; \
+    gpg --show-keys --with-colons /usr/share/keyrings/nginx.gpg | grep -q "^fpr:::::::::$(awk '$1=="nginx_signing"{print $2}' /tmp/nginx-keys.txt):"; \
+    echo "deb [signed-by=/usr/share/keyrings/nginx.gpg] https://nginx.org/packages/debian ${DEBIAN} nginx" \
+        > /etc/apt/sources.list.d/nginx.list; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        "nginx=${NGINX_VERSION}-1~${DEBIAN}" \
+        "nginx-module-otel=${NGINX_VERSION}+${NGINX_OTEL_VERSION}-1~${DEBIAN}" \
+        gettext-base \
+        $(cat /tmp/runtime-packages.txt); \
+    apt-get purge -y --auto-remove curl gnupg; \
+    rm -rf /var/lib/apt/lists/* /tmp/runtime-packages.txt /tmp/nginx-keys.txt \
+        /etc/nginx/conf.d /etc/nginx/nginx.conf /usr/share/nginx/html/*; \
+    ln -sf /dev/stdout /var/log/nginx/access.log; \
+    ln -sf /dev/stderr /var/log/nginx/error.log
 
-# Production stage - minimal runtime container
-FROM debian:bookworm-slim
+# The shared library only (the static .a alone is ~200 MB).
+COPY --from=builder /usr/local/modsecurity/lib/libmodsecurity.so* /usr/local/modsecurity/lib/
+COPY --from=builder /out/modules/ /usr/lib/nginx/modules/
+COPY --from=builder /out/coreruleset/ /usr/local/coreruleset/
+COPY --from=builder /out/unicode.mapping /etc/modsecurity/unicode.mapping
+RUN echo /usr/local/modsecurity/lib > /etc/ld.so.conf.d/modsecurity.conf && ldconfig \
+    && for m in /usr/lib/nginx/modules/*.so; do ! ldd "$m" | grep -q 'not found'; done
 
-# Install only essential runtime dependencies that aren't in slim
-RUN apt-get update && apt-get install -y \
-    --no-install-recommends \
-    ca-certificates \
-    libapr1 \
-    libaprutil1 \
-    libaprutil1-ldap \
-    libldap-common \
-    libbrotli1 \
-    libcurl4 \
-    libjansson4 \
-    liblua5.2-0 \
-    libnghttp2-14 \
-    libpcre2-8-0 \
-    libssl3 \
-    libxml2 \
-    zlib1g \
-    && rm -rf /var/lib/apt/lists/* \
-    && apt-get clean
+COPY nginx.conf /etc/nginx/nginx.conf
+COPY dalton/ /etc/nginx/dalton/
+COPY snippets/ /etc/nginx/snippets/
+COPY modsecurity/ /etc/modsecurity/
+COPY html/ /usr/share/nginx/html/
+COPY --chmod=0755 docker-entrypoint.sh /docker-entrypoint.sh
 
-# Create www-data user with consistent UID/GID across stages (only if they don't exist)
-RUN getent group www-data || groupadd -r -g 33 www-data && \
-    getent passwd www-data || useradd -r -u 33 -g www-data www-data
+# The fleet mounts its sites directory here (read-only).
+RUN mkdir -p /etc/nginx/templates
 
-# Copy Apache installation from builder
-COPY --from=builder /static-build/apache2 /usr/local/apache2
-
-# Copy security modules
-COPY --from=builder /static-build/modules/*.so /usr/local/apache2/modules/
-
-# Copy complete ModSecurity installation including headers and config files
-RUN mkdir -p /usr/local/modsecurity/
-COPY --from=builder /usr/local/modsecurity/ /usr/local/modsecurity/
-COPY --from=builder /static-build/runtime-libs/* /usr/local/lib/
-
-# Copy OWASP Core Rule Set
-COPY --from=builder /static-build/coreruleset /usr/local/coreruleset
-
-# Update library cache
-RUN ldconfig
-
-# Set working directory and PATH
-WORKDIR /usr/local/apache2
-ENV PATH=/usr/local/apache2/bin:$PATH
-
-# Create necessary directories with proper ownership  
-RUN mkdir -p /usr/local/apache2/run \
-    && mkdir -p /etc/modsecurity \
-    && mkdir -p /usr/local/apache2/conf/sites-enabled \
-    && chown -R www-data:www-data /usr/local/apache2/run
-
-# Copy configuration files
-COPY modsecurity.conf /etc/modsecurity/
-COPY --from=builder /tmp/ModSecurity/unicode.mapping /etc/modsecurity/unicode.mapping
-COPY security.conf /usr/local/apache2/conf/
-COPY httpd-nonroot.conf /usr/local/apache2/conf/
-
-# Configure Apache for non-root operation
-RUN sed -i -E 's/^([[:space:]]*)(ErrorLog|CustomLog|Listen)/\1# \2/' /usr/local/apache2/conf/httpd.conf && \
-    echo 'Include conf/httpd-nonroot.conf' >> /usr/local/apache2/conf/httpd.conf
-# Switch to non-privileged user
-USER www-data
-
+# Non-root; nothing is written outside /tmp (the fleets run it read_only).
+USER nginx
 EXPOSE 3000
 
-# Container health check - verify httpd process is running using /proc filesystem
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-    CMD test -d /proc/$(cat /usr/local/apache2/run/httpd.pid 2>/dev/null) 2>/dev/null || exit 1
+    CMD pid="$(cat /tmp/nginx/nginx.pid 2>/dev/null)" && [ -n "$pid" ] && test -d "/proc/$pid" || exit 1
 
-CMD ["httpd", "-D", "FOREGROUND"]
+ENTRYPOINT ["/docker-entrypoint.sh"]
+STOPSIGNAL SIGQUIT
