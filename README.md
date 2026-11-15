@@ -126,6 +126,12 @@ Rules that keep sites correct:
   limited, as mod_evasive's `DOSWhitelist` had it. There's no equivalent of
   `DOSBlockingPeriod`: a client over the rate is refused per request, not
   banned for a time.
+- CRS doesn't read the JSON-RPC body on `/mcp` (Claude Code's `_meta`
+  argument names and free-form tool arguments set off 930120, 942100,
+  932130 and more), nor the GraphQL document (`json.query`) on
+  `/api/graphql` and `/api/open-graphql` (its `$variables` and field names
+  set off 942290 and 932235). GraphQL variables are still inspected. See
+  `modsecurity/crs-overrides.conf`.
 - ModSecurity: `modsecurity/modsecurity.conf` (body access, JSON/XML parsers,
   limits, audit log to stderr), CRS 4 with plugins, `crs-overrides.conf`.
 
@@ -163,6 +169,10 @@ docker build -t dalton:nginx-dev .
 python3 -I test/parity.py --fleet ../hs-backend-spot --apache-image ghcr.io/hikari-systems/dalton:apache-final
 python3 -I test/parity.py --fleet ../hs-bae-spot     --apache-image ghcr.io/hikari-systems/dalton:apache-final
 python3 -I test/parity.py --fleet ../rally-backend-spot --apache-image ghcr.io/hikari-systems/dalton:apache-final --slow
+# CRS false positives: every GraphQL operation in the UIs (extracted from their
+# sources under the repos root) and realistic Claude Code MCP calls, with
+# ModSecurity On. Fails if anything legitimate is blocked or an attack isn't.
+python3 -I test/crs-replay.py dalton:nginx-dev ../hs-backend-spot/sites ..
 # nginx-only: ModSecurity On, rate limits, startup without upstreams, refusing bad env, OpenTelemetry.
 sh test/nginx-checks.sh dalton:nginx-dev ../hs-backend-spot
 ```
