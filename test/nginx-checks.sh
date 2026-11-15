@@ -160,10 +160,21 @@ PARENT=4bf92f3577b34da6a3ce929d0e0e4736
 resp=$(curl -s -H 'Host: lloquent.test' -H "x-hs-api: $KEY" -H "traceparent: 00-$PARENT-00f067aa0ba902b7-01" http://127.0.0.1:18090/traced)
 echo "$resp" | grep -q "\"traceparent\": \"00-$PARENT-" && ok "upstream received dalton's traceparent in the same trace" || bad "upstream traceparent: $(echo "$resp" | grep -o '"traceparent": "[^"]*"')"
 curl -s -o /dev/null -H 'Host: woodhouse.test' -H "x-hs-api: $KEY" http://127.0.0.1:18090/api/me
+# Not traced: the ALB's health checks (any vhost), and worker polls without a sampled parent.
+curl -s -o /dev/null -H 'Host: 10.0.0.1' http://127.0.0.1:18090/healthcheck
+curl -s -o /dev/null -H 'Host: woodhouse.test' -H "x-hs-api: $KEY" http://127.0.0.1:18090/healthcheck
+curl -s -o /dev/null -X POST -H 'Host: woodhouse.test' -H "x-hs-api: $KEY" -H 'Content-Type: application/json' --data '{}' http://127.0.0.1:18090/worker/claim
+# Traced: a worker call that arrives with a sampled parent (dalton follows the caller).
+WORKER_PARENT=5af7183fb1d4cf5f6b2b6fd4c1f0e9a2
+curl -s -o /dev/null -X POST -H 'Host: woodhouse.test' -H "x-hs-api: $KEY" -H 'Content-Type: application/json' -H "traceparent: 00-$WORKER_PARENT-1111111111111111-01" --data '{}' http://127.0.0.1:18090/worker/heartbeat
 sleep 7
 if grep -q "$PARENT" "$HERE/out/otel/traces.jsonl" 2>/dev/null; then ok "span with the incoming trace id reached the Collector"; else bad "no span for trace $PARENT"; fi
 grep -q '"dalton"' "$HERE/out/otel/traces.jsonl" 2>/dev/null && ok "service.name dalton" || bad "service.name dalton missing"
 grep -q 'client.address' "$HERE/out/otel/traces.jsonl" 2>/dev/null && ok "client.address attribute present" || bad "client.address missing"
+grep -q '"/api/me"' "$HERE/out/otel/traces.jsonl" 2>/dev/null && ok "a request without a parent is traced (sample ratio 1.0)" || bad "no span for /api/me"
+grep -q '"/healthcheck"' "$HERE/out/otel/traces.jsonl" 2>/dev/null && bad "/healthcheck was traced" || ok "/healthcheck not traced"
+grep -q '"/worker/claim"' "$HERE/out/otel/traces.jsonl" 2>/dev/null && bad "/worker/claim without a parent was traced" || ok "/worker/claim without a sampled parent not traced"
+grep -q "$WORKER_PARENT" "$HERE/out/otel/traces.jsonl" 2>/dev/null && ok "/worker/ call with a sampled parent traced (follows the caller)" || bad "no span for the /worker/ call with a sampled parent"
 log=$(docker logs checks-dalton 2>/dev/null | grep '/traced' | tail -1)
 echo "$log" | grep -q "trace_id=$PARENT" && ok "access log carries the trace id" || bad "access log: $log"
 

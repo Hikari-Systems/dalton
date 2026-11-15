@@ -101,14 +101,28 @@ otel_resource_attr deployment.environment.name "${ENV_NAME:-unknown}";
 # upstream, so controller spans are children of dalton's.
 otel_trace_context propagate;
 
-# A sampled parent is always followed; otherwise sample OTEL_SAMPLE_RATIO.
+# What to trace, by path:
+# - /healthcheck (every vhost: the ALB's checks, a few a second per node): never;
+# - /worker/... (woodhouse's workers, whose /worker/claim is a 25 s long poll the
+#   controller deliberately doesn't export): only a request that arrives with a
+#   sampled parent, so dalton follows the caller and adds no spans of its own;
+# - everything else: a sampled parent is always followed, otherwise
+#   OTEL_SAMPLE_RATIO of requests.
 split_clients "\$otel_trace_id" \$dalton_ratio_sampled {
     ${PCT}% on;
     *       off;
 }
-map \$otel_parent_sampled \$dalton_otel_trace {
-    "1"     on;
-    default \$dalton_ratio_sampled;
+map \$uri \$dalton_otel_route {
+    "~^/healthcheck(?:/|\$)" never;
+    "~^/worker/"            parent;
+    default                 sample;
+}
+map "\$dalton_otel_route:\$otel_parent_sampled" \$dalton_otel_trace {
+    "~^never:"      off;
+    "parent:1"      on;
+    "~^parent:"     off;
+    "sample:1"      on;
+    default         \$dalton_ratio_sampled;
 }
 otel_trace \$dalton_otel_trace;
 
