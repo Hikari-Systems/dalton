@@ -120,6 +120,10 @@ r=$(burst 60 lloquent.test /same)
 [ "$r" = 0 ] && ok "on: private address (the ALB, containers) never limited" || bad "on: private address got $r refusals"
 r=$(burst 60 woodhouse.test "/hooks/$T43/github" -X POST -H "$PUB" -H 'Content-Type: application/json' --data '{}')
 [ "$r" = 0 ] && ok "on: signed webhook route exempt (60 POSTs, none refused)" || bad "on: webhook route got $r refusals"
+r=$(burst 60 lloquent.test /mcp -X POST -H "$PUB" -H 'Content-Type: application/json' --data '{"jsonrpc":"2.0","id":1,"method":"tools/list"}')
+[ "$r" = 0 ] && ok "on: /mcp exempt (60 POSTs from one client, none refused)" || bad "on: /mcp got $r refusals"
+r=$(burst 60 lloquent.test /mcpx -H "$PUB")
+[ "$r" -gt 0 ] && ok "on: /mcpx still limited ($r of 60 refused)" || bad "on: /mcpx not limited"
 dalton -e OTEL_ENABLED=false -e RATE_LIMIT=on -e RATE_LIMIT_PAGE_RPS=1000 -e RATE_LIMIT_SITE_RPS=5 || bad "didn't start with custom rates"
 r=$(burst 40 lloquent.test "/p" -H 'X-Forwarded-For: 203.0.113.52')
 [ "$r" -gt 0 ] && ok "on: RATE_LIMIT_SITE_RPS=5 applies across pages ($r of 40 refused)" || bad "on: site limit didn't apply"

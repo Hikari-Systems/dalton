@@ -123,7 +123,9 @@ Rules that keep sites correct:
   `Server` or `X-Powered-By` header is sent.
 - Rate limits (`RATE_LIMIT`, off by default): keyed on the real client IP;
   private addresses (the ALB's health checks, other containers) are never
-  limited, as mod_evasive's `DOSWhitelist` had it. There's no equivalent of
+  limited, as mod_evasive's `DOSWhitelist` had it, and neither is `/mcp` on
+  any vhost: claude.ai's MCP connector reaches every server from a few shared
+  egress addresses, so per-IP limits would throttle all its users together. There's no equivalent of
   `DOSBlockingPeriod`: a client over the rate is refused per request, not
   banned for a time.
 - CRS doesn't read the JSON-RPC body on `/mcp` (Claude Code's `_meta`
