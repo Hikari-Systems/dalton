@@ -9,7 +9,7 @@ its controller.
 | Part | Version |
 |---|---|
 | Base | `debian:trixie-slim` (`--build-arg DEBIAN=bookworm` for bookworm-slim) |
-| nginx | 1.30.6, nginx.org packages |
+| nginx | 1.30.7, nginx.org packages |
 | OpenTelemetry | nginx-otel 0.1.2 (`nginx-module-otel`), OTLP/gRPC |
 | ModSecurity | libmodsecurity 3.0.17, ModSecurity-nginx 1.0.4 |
 | OWASP CRS | 4.30.0 (signature checked) |
